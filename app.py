@@ -183,7 +183,7 @@ def health_check():
     Liveness probe reporting whether the API process is running and whether
     reusable RAG components (FAISS vector store) are initialized in memory.
     """
-    configured_backend = os.getenv("LLM_BACKEND", "ollama")
+    configured_backend = os.getenv("LLM_BACKEND", "cloud")
     is_ready = bool(support_rag.vector_store is not None)
     return HealthResponse(
         status="running",
@@ -219,7 +219,7 @@ def ask_question(req: AskRequest, response: Response):
         latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
         response.headers["X-Response-Time-Ms"] = str(latency_ms)
 
-        backend_used = os.getenv("LLM_BACKEND", "ollama")
+        backend_used = os.getenv("LLM_BACKEND", "cloud")
         logger.info(
             "Completed /ask request in %.2f ms [backend=%s, intent=%s]",
             latency_ms,

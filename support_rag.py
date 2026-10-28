@@ -109,69 +109,32 @@ def call_llm_backend(prompt: str) -> str:
     """
     Invokes the configured LLM backend based on environment settings.
     Keeps the LLM backend decoupled from the RAG retrieval pipeline so backends
-    can be swapped (Cloud API vs. Local Ollama) without modifying pipeline logic.
+    can be swapped (Cloud Gemini/HF vs. Local Ollama) without modifying pipeline logic.
     Never exposes API keys or private tokens in errors or logs.
     """
-    # Read backend choice: 'ollama' (default) or 'cloud' or 'mock'
-    backend = os.getenv("LLM_BACKEND", "ollama").lower()
+    # Read backend choice: 'cloud' (default), 'gemini', 'ollama', or 'mock'
+    backend = os.getenv("LLM_BACKEND", "cloud").lower()
     fallback_on_failure = os.getenv("FALLBACK_ON_CLOUD_FAILURE", "false").lower() == "true"
 
-    # Option A: Cloud-hosted API (Hugging Face Inference Providers)
-    if backend == "cloud":
-        hf_token = os.getenv("HF_TOKEN")
-        hf_api_url = os.getenv("HF_API_URL", "https://router.huggingface.co/v1/chat/completions")
-        hf_model = os.getenv("HF_MODEL_NAME", "deepseek-ai/DeepSeek-R1:fastest")
-
-        # Validate that the secret token is provided
-        if not hf_token:
-            raise LLMBackendError("Cloud LLM configuration error: HF_TOKEN is not configured.")
-
-        # Set up headers with Bearer authentication
-        headers = {
-            "Authorization": f"Bearer {hf_token}",
-            "Content-Type": "application/json"
-        }
-        # Format payload following OpenAI-compatible chat completion schema
-        payload = {
-            "model": hf_model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 200,
-            "temperature": 0.0
-        }
+    # Option A: Cloud-hosted API (Google Gemini or Hugging Face)
+    if backend in ("cloud", "gemini"):
+        gemini_key = (os.getenv("GEMINI_KEY") or os.getenv("GEMINI_API_KEY") or "").strip("'\"")
+        cloud_provider = os.getenv("CLOUD_PROVIDER", "gemini" if gemini_key else "huggingface").lower()
 
         try:
-            # Make the HTTP request to the cloud inference endpoint
-            response = requests.post(hf_api_url, headers=headers, json=payload, timeout=25)
-            if response.status_code == 200:
-                data = response.json()
-                return data["choices"][0]["message"]["content"].strip()
+            if cloud_provider == "gemini" or (gemini_key and not os.getenv("HF_TOKEN")):
+                return _call_gemini(prompt)
+            elif os.getenv("HF_TOKEN"):
+                return _call_huggingface(prompt)
+            elif gemini_key:
+                return _call_gemini(prompt)
             else:
-                # Handle quota exhaustion (402), rate limit (429), or server error
-                err_detail = f"Cloud provider returned status {response.status_code}"
-                try:
-                    err_json = response.json()
-                    if "error" in err_json:
-                        err_detail += f": {err_json['error']}"
-                except Exception:
-                    pass
-
-                logger.warning(f"Cloud LLM request failed: {err_detail}")
-
-                # Optional automatic fallback to local Ollama if cloud quota runs out
-                if fallback_on_failure:
-                    logger.info("Falling back to local Ollama backend...")
-                    return _call_ollama(prompt)
-
-                raise LLMBackendError(f"Cloud LLM unavailable: {err_detail}")
-
-        except requests.exceptions.RequestException as e:
-            logger.error("Cloud LLM network request error")
+                raise LLMBackendError("Cloud LLM configuration error: GEMINI_KEY (or HF_TOKEN) is not configured.")
+        except LLMBackendError:
             if fallback_on_failure:
-                logger.info("Falling back to local Ollama backend after network error...")
+                logger.info("Falling back to local Ollama backend...")
                 return _call_ollama(prompt)
-            raise LLMBackendError(f"Cloud LLM connection failed: {type(e).__name__}")
+            raise
 
     # Option B: Local LLM served via Ollama (llama3:8b)
     elif backend == "ollama":
@@ -185,6 +148,104 @@ def call_llm_backend(prompt: str) -> str:
 
     else:
         raise LLMBackendError(f"Unsupported LLM backend: '{backend}'")
+
+
+def _call_gemini(prompt: str) -> str:
+    """
+    Invokes Google Gemini REST API using the official endpoint.
+    Uses 'gemini-2.5-flash' by default, or the model configured in GEMINI_MODEL_NAME.
+    Zero-dependency via standard requests library.
+    """
+    gemini_key = (os.getenv("GEMINI_KEY") or os.getenv("GEMINI_API_KEY") or "").strip("'\"")
+    if not gemini_key:
+        raise LLMBackendError("Cloud LLM configuration error: GEMINI_KEY is not configured.")
+
+    model = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 800
+        }
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    return parts[0].get("text", "").strip()
+            raise LLMBackendError("Gemini returned empty candidate response.")
+        else:
+            err_detail = f"Gemini provider returned status {response.status_code}"
+            try:
+                err_json = response.json()
+                if "error" in err_json and "message" in err_json["error"]:
+                    err_detail += f": {err_json['error']['message']}"
+            except Exception:
+                pass
+            logger.warning(f"Gemini LLM request failed: {err_detail}")
+            raise LLMBackendError(f"Gemini LLM unavailable: {err_detail}")
+    except requests.exceptions.RequestException as e:
+        logger.error("Gemini LLM network request error")
+        raise LLMBackendError(f"Gemini LLM connection failed: {type(e).__name__}")
+
+
+def _call_huggingface(prompt: str) -> str:
+    """
+    Invokes Hugging Face Inference Providers endpoint.
+    """
+    hf_token = os.getenv("HF_TOKEN")
+    hf_api_url = os.getenv("HF_API_URL", "https://router.huggingface.co/v1/chat/completions")
+    hf_model = os.getenv("HF_MODEL_NAME", "deepseek-ai/DeepSeek-R1:fastest")
+
+    if not hf_token:
+        raise LLMBackendError("Cloud LLM configuration error: HF_TOKEN is not configured.")
+
+    headers = {
+        "Authorization": f"Bearer {hf_token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": hf_model,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 200,
+        "temperature": 0.0
+    }
+
+    try:
+        response = requests.post(hf_api_url, headers=headers, json=payload, timeout=25)
+        if response.status_code == 200:
+            data = response.json()
+            return data["choices"][0]["message"]["content"].strip()
+        else:
+            err_detail = f"HuggingFace provider returned status {response.status_code}"
+            try:
+                err_json = response.json()
+                if "error" in err_json:
+                    err_detail += f": {err_json['error']}"
+            except Exception:
+                pass
+            logger.warning(f"HuggingFace LLM request failed: {err_detail}")
+            raise LLMBackendError(f"Cloud LLM unavailable: {err_detail}")
+    except requests.exceptions.RequestException as e:
+        logger.error("HuggingFace LLM network request error")
+        raise LLMBackendError(f"Cloud LLM connection failed: {type(e).__name__}")
 
 
 def _call_ollama(prompt: str) -> str:
