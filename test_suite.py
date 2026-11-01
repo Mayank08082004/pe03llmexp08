@@ -14,6 +14,7 @@ import os
 import json
 from fastapi.testclient import TestClient
 from app import app
+import support_rag
 
 # Initialize FastAPI test client for in-process HTTP requests
 client = TestClient(app)
@@ -23,6 +24,9 @@ def run_tests():
     print("=" * 70)
     print("EXPERIMENT 7: TEST SUITE EXECUTION")
     print("=" * 70)
+
+    # Ensure vector store and embeddings are warmed up for test suite
+    support_rag.init_components()
 
     # -----------------------------------------------------------------------
     # Test 1: Health Endpoint Check

@@ -16,6 +16,8 @@ Features:
 import os
 import time
 import logging
+import asyncio
+from contextlib import asynccontextmanager
 from typing import List
 from dotenv import load_dotenv
 
@@ -40,11 +42,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger("rag_api")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI lifespan event handler:
+    Initializes RAG components in a background thread upon startup so Uvicorn
+    can immediately bind to 0.0.0.0:$PORT without blocking Render's port scan.
+    """
+    logger.info("Application starting up: initializing RAG background warmup...")
+    asyncio.create_task(asyncio.to_thread(support_rag.init_components))
+    yield
+    logger.info("Application shutdown complete.")
+
+
 # Initialize FastAPI application instance with title and metadata
 app = FastAPI(
     title="Customer Support RAG API",
     description="Production-ready FastAPI service exposing the Customer Support RAG workflow with input validation, latency measurement, and secure error handling.",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 

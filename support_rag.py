@@ -83,22 +83,35 @@ splitter = RecursiveCharacterTextSplitter(
 chunks = splitter.split_documents([faq_doc])
 
 # ---------------------------------------------------------------------------
-# 2. Embedding Model & Vector Index Initialization (Run ONCE at Startup)
+# 2. Embedding Model & Vector Index Initialization (Startup / Non-blocking)
 # ---------------------------------------------------------------------------
 
-# Load the HuggingFace MiniLM embedding model to convert text chunks into dense vectors
-embedding_model = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+embedding_model = None
+vector_store = None
+retriever = None
 
-# Build a FAISS in-memory vector store from the document chunks using the embedding model
-vector_store = FAISS.from_documents(chunks, embedding_model)
 
-# Create a retriever interface configured to fetch the top 3 most similar chunks
-retriever = vector_store.as_retriever(
-    search_type="similarity",
-    search_kwargs={"k": 3}
-)
+def init_components():
+    """
+    Initializes the HuggingFace embedding model and FAISS vector index.
+    Run at application startup or lazily upon retrieval requests so that the
+    web service process can immediately bind its port without blocking Uvicorn.
+    """
+    global embedding_model, vector_store, retriever
+    if vector_store is not None:
+        return vector_store
+
+    logger.info("Initializing HuggingFace embedding model and FAISS vector store...")
+    embedding_model = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+    vector_store = FAISS.from_documents(chunks, embedding_model)
+    retriever = vector_store.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 3}
+    )
+    logger.info("RAG vector store and retriever successfully initialized.")
+    return vector_store
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +336,9 @@ def retrieve_context(state: SupportState):
     Node 2: Vector retrieval using FAISS.
     Queries the vector store for chunks most similar to search_query.
     """
+    global retriever
+    if retriever is None:
+        init_components()
     docs = retriever.invoke(state["search_query"])
     context = "\n\n".join(d.page_content for d in docs)
     sources = [d.metadata.get("source", "support_faq.txt") for d in docs]
@@ -469,6 +485,8 @@ def ask_support(question: str) -> dict:
     Public entrypoint function called by FastAPI app.py.
     Invokes the LangGraph RAG workflow with the given question and returns the result dictionary.
     """
+    if vector_store is None:
+        init_components()
     result = support_graph.invoke({
         "question": question,
         "retry_count": 0
