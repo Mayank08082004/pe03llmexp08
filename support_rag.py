@@ -5,6 +5,18 @@ and Mock mode for controlled testing.
 """
 
 import os
+
+# Configure memory-constrained environment settings (Render 512MB RAM ceiling)
+os.environ["HF_HUB_DISABLE_XET"] = "1"         # Disable hf_xet multi-threaded memory buffer explosion
+os.environ["TOKENIZERS_PARALLELISM"] = "false" # Prevent thread explosion in tokenizers
+os.environ["OMP_NUM_THREADS"] = "1"            # Restrict OpenMP thread count
+os.environ["MKL_NUM_THREADS"] = "1"            # Restrict MKL thread count
+
+# Use local workspace cache if present
+_cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "huggingface")
+if os.path.exists(_cache_path):
+    os.environ["HF_HOME"] = _cache_path
+
 import logging
 from typing import TypedDict, List
 import requests
@@ -101,15 +113,23 @@ def init_components():
     if vector_store is not None:
         return vector_store
 
+    import torch
+    import gc
+
+    # Force single thread to avoid OpenMP memory explosion on multicore host instances
+    torch.set_num_threads(1)
+
     logger.info("Initializing HuggingFace embedding model and FAISS vector store...")
     embedding_model = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"}
     )
     vector_store = FAISS.from_documents(chunks, embedding_model)
     retriever = vector_store.as_retriever(
         search_type="similarity",
         search_kwargs={"k": 3}
     )
+    gc.collect()
     logger.info("RAG vector store and retriever successfully initialized.")
     return vector_store
 

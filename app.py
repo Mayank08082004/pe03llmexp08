@@ -14,6 +14,18 @@ Features:
 """
 
 import os
+
+# Configure memory-constrained environment settings (Render 512MB RAM ceiling)
+os.environ["HF_HUB_DISABLE_XET"] = "1"         # Disable hf_xet multi-threaded memory buffer explosion
+os.environ["TOKENIZERS_PARALLELISM"] = "false" # Prevent thread explosion in tokenizers
+os.environ["OMP_NUM_THREADS"] = "1"            # Restrict OpenMP thread count
+os.environ["MKL_NUM_THREADS"] = "1"            # Restrict MKL thread count
+
+# Use local workspace cache if present
+_cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "huggingface")
+if os.path.exists(_cache_path):
+    os.environ["HF_HOME"] = _cache_path
+
 import time
 import logging
 import asyncio
